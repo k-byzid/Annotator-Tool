@@ -1,25 +1,26 @@
 /*
- * Annotator front end.
+ * Annotator.
  *
- * Three steps, in order: upload a photo, click its 4 corners to straighten
- * it, then check the text boxes OCR found. Everything the OCR produces stays
- * marked unverified until a person accepts it.
+ * Three steps: choose a photo, click its 4 corners to flatten it, then check
+ * the text boxes OCR found. Everything OCR produces stays marked unverified
+ * until a person accepts it, and the finished labels download to this device.
  */
-"use strict";
+import { warp } from "./warp.js";
+import { read } from "./ocr.js";
 
 const MAX_CANVAS_WIDTH = 1000;   // biggest we draw, in screen pixels
 const HANDLE_RADIUS = 7;         // how near a corner counts as grabbing it
 const MIN_BOX = 6;               // ignore drags smaller than this
 
 const state = {
-  name: null,        // page name on the server
-  photo: null,       // the uploaded image
-  page: null,        // the straightened image
+  name: "page",
+  photo: null,       // the chosen image
+  page: null,        // the straightened canvas
   corners: [],       // up to 4 {x, y} in photo pixels
   dragCorner: -1,
-  boxes: [],         // {points, text, kind, confidence, verified}
+  boxes: [],
   selected: -1,
-  drawing: null,     // in-progress box while dragging
+  drawing: null,
   scale: 1,
 };
 
@@ -31,20 +32,11 @@ function escapeHtml(text) {
   return holder.innerHTML;
 }
 
-async function postJson(url, body) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return response.json();
-}
-
 function loadImage(url) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Could not load " + url));
+    image.onerror = () => reject(new Error("Could not read that image."));
     image.src = url;
   });
 }
@@ -65,34 +57,29 @@ function toImage(canvas, event) {
 
 /* ------------------------------------------------------------- step 1 */
 
-async function upload(file) {
-  const form = new FormData();
-  form.append("file", file);
-  const message = $("upload-msg");
-  message.textContent = "Uploading...";
-  message.className = "msg";
+$("file-input").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
 
-  const response = await fetch("/api/upload", { method: "POST", body: form });
-  const data = await response.json();
-  if (data.error) {
-    message.textContent = data.error;
+  const message = $("upload-msg");
+  try {
+    state.photo = await loadImage(URL.createObjectURL(file));
+  } catch (error) {
+    message.textContent = error.message;
     message.className = "msg bad";
     return;
   }
 
-  state.name = data.name;
-  state.photo = await loadImage(data.url);
+  state.name = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_-]+/g, "_") || "page";
   state.corners = [];
-  message.textContent = data.width + " x " + data.height + " pixels";
+  state.boxes = [];
+  state.selected = -1;
+  message.textContent = state.photo.width + " x " + state.photo.height + " pixels";
   message.className = "msg";
 
   $("step-corners").hidden = false;
   $("step-boxes").hidden = true;
   drawCorners();
-}
-
-$("file-input").addEventListener("change", (event) => {
-  if (event.target.files.length) upload(event.target.files[0]);
 });
 
 /* ------------------------------------------------------------- step 2 */
@@ -183,32 +170,27 @@ $("btn-clear-corners").onclick = () => {
   drawCorners();
 };
 
-$("btn-straighten").onclick = async () => {
-  const corners = state.corners.map((p) => [p.x, p.y]);
-  const data = await postJson("/api/straighten", {
-    name: state.name,
-    corners: corners,
-  });
-  if (data.error) {
-    $("corner-count").textContent = data.error;
-    return;
-  }
-
-  state.page = await loadImage(data.url + "?t=" + Date.now());
+function startBoxes(canvas) {
+  state.page = canvas;
   state.boxes = [];
   state.selected = -1;
   $("step-boxes").hidden = false;
-  drawBoxes();
+  refreshBoxes();
+  runOcr();
+}
 
-  // Reopen what this page already has; otherwise start from an OCR draft.
-  const existing = await fetch("/api/page/" + state.name).then((r) => r.json());
-  if (existing.boxes && existing.boxes.length) {
-    state.boxes = existing.boxes;
-    refreshBoxes();
-    $("read-msg").textContent = "Loaded " + state.boxes.length + " saved boxes.";
-  } else {
-    runOcr();
-  }
+$("btn-straighten").onclick = () => {
+  startBoxes(warp(state.photo, state.corners));
+};
+
+// A scan or a screenshot is already flat, and forcing four clicks onto one
+// would only introduce error.
+$("btn-skip").onclick = () => {
+  const canvas = document.createElement("canvas");
+  canvas.width = state.photo.width;
+  canvas.height = state.photo.height;
+  canvas.getContext("2d").drawImage(state.photo, 0, 0);
+  startBoxes(canvas);
 };
 
 /* ------------------------------------------------------------- step 3 */
@@ -266,8 +248,8 @@ function hitTest(point) {
   for (let i = state.boxes.length - 1; i >= 0; i -= 1) {
     const xs = state.boxes[i].points.map((p) => p[0]);
     const ys = state.boxes[i].points.map((p) => p[1]);
-    if (point.x >= Math.min.apply(null, xs) && point.x <= Math.max.apply(null, xs) &&
-        point.y >= Math.min.apply(null, ys) && point.y <= Math.max.apply(null, ys)) {
+    if (point.x >= Math.min(...xs) && point.x <= Math.max(...xs) &&
+        point.y >= Math.min(...ys) && point.y <= Math.max(...ys)) {
       return i;
     }
   }
@@ -363,6 +345,7 @@ function acceptBox() {
   } else {
     refreshBoxes();
     $("read-msg").textContent = "All boxes checked.";
+    $("read-msg").className = "msg ok";
   }
 }
 
@@ -419,29 +402,33 @@ function deleteSelected() {
   refreshBoxes();
 }
 
-/* --------------------------------------------------------- OCR + save */
+/* ----------------------------------------------------- OCR + download */
 
 async function runOcr() {
   const message = $("read-msg");
-  message.textContent = "Reading... the first run loads the model, so give it a moment.";
   message.className = "msg";
+  message.textContent = "Starting OCR...";
 
-  const data = await postJson("/api/read", { name: state.name });
-  if (data.error) {
-    message.textContent = data.error;
+  try {
+    const languages = $("lang").value.split("+");
+    const found = await read(state.page, languages, (update) => {
+      const percent = Math.round((update.progress || 0) * 100);
+      message.textContent = update.status + " " + percent + "%";
+    });
+
+    // Keep anything already confirmed; OCR only fills in the rest.
+    state.boxes = state.boxes.filter((b) => b.verified).concat(found);
+    state.selected = -1;
+    refreshBoxes();
+
+    message.textContent = "OCR found " + found.length +
+                          " boxes. Dashed grey ones are unchecked.";
+    const first = state.boxes.findIndex((b) => !b.verified);
+    if (first >= 0) selectBox(first);
+  } catch (error) {
+    message.textContent = error.message;
     message.className = "msg bad";
-    return;
   }
-
-  // Keep anything already confirmed; OCR only fills in the rest.
-  state.boxes = state.boxes.filter((b) => b.verified).concat(data.boxes);
-  state.selected = -1;
-  refreshBoxes();
-
-  message.textContent = "OCR found " + data.count +
-                        " boxes. Dashed grey ones are unchecked.";
-  const first = state.boxes.findIndex((b) => !b.verified);
-  if (first >= 0) selectBox(first);
 }
 
 $("btn-read").onclick = runOcr;
@@ -462,45 +449,46 @@ $("btn-clear-boxes").onclick = () => {
   refreshBoxes();
 };
 
-$("btn-save").onclick = async () => {
+function download(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+$("btn-download").onclick = () => {
   saveSelectedText();
   const message = $("save-msg");
 
-  const data = await postJson("/api/save", {
-    name: state.name,
-    boxes: state.boxes,
-    width: state.page.width,
-    height: state.page.height,
-  });
-
-  if (data.error) {
-    message.textContent = data.error;
+  if (!state.boxes.length) {
+    message.textContent = "There are no boxes to save.";
     message.className = "msg bad";
     return;
   }
-  message.textContent = "Saved " + data.saved + " boxes to " + data.labels;
+
+  const record = {
+    image: state.name,
+    width: state.page.width,
+    height: state.page.height,
+    created: new Date().toISOString().slice(0, 19),
+    boxes: state.boxes,
+  };
+  download(state.name + ".json", JSON.stringify(record, null, 2));
+
+  // ICDAR-2015: eight numbers then the text, one box per line. Text nobody
+  // has confirmed goes out as "###", the don't-care marker -- exporting an
+  // unchecked guess as truth would train a model on its own mistakes.
+  const lines = state.boxes.map((box) => {
+    const coords = box.points.map((p) => Math.round(p[0]) + "," + Math.round(p[1])).join(",");
+    const text = box.text && box.verified ? box.text : "###";
+    return coords + "," + text;
+  });
+  download("gt_" + state.name + ".txt", lines.join("\n") + "\n");
+
+  const confirmed = state.boxes.filter((b) => b.verified && b.text).length;
+  message.textContent = "Downloaded " + state.boxes.length + " boxes (" +
+                        confirmed + " confirmed) as .json and .txt";
   message.className = "msg ok";
-  refreshProgress();
 };
-
-/* ----------------------------------------------------------- progress */
-
-async function refreshProgress() {
-  const holder = $("progress");
-  try {
-    const data = await fetch("/api/pages").then((r) => r.json());
-    if (!data.pages.length) {
-      holder.textContent = "Nothing annotated yet.";
-      return;
-    }
-    const names = data.pages
-      .map((p) => escapeHtml(p.name) + " (" + p.boxes + ")")
-      .join(", ");
-    holder.innerHTML = "<b>" + data.pages.length + "</b> pages, <b>" +
-                       data.total_boxes + "</b> boxes: " + names;
-  } catch (error) {
-    holder.textContent = "Could not reach the server.";
-  }
-}
-
-refreshProgress();

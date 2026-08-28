@@ -153,3 +153,30 @@ kbd {
 
 #progress { font-size: 14px; color: var(--muted); }
 #progress b { color: var(--ink); }
+
+/* Inline label for the language picker, next to the file input. */
+label.inline {
+  font-size: 13px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+label.inline select {
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+}
+
+footer {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 20px;
+  color: var(--muted);
+  font-size: 13px;
+}
+footer a { color: var(--accent); }
