@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Uploaded pages and the annotations made from them. These are your own
+# documents -- keep them out of the repo.
+data/
+
+# EasyOCR model weights, downloaded on first run
+*.pth
+
+# Test and tooling caches
+.pytest_cache/
+.coverage
+
+# Editors / OS
+.vs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local copy of the screenshots; the repo copies live in docs/images/
+Examples/

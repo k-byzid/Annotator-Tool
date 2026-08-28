@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Annotator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Annotator</h1>
+  <p class="sub">Mark up the text in a receipt, form or document.</p>
+</header>
+
+<main>
+  <section class="step" id="step-upload">
+    <h2><span class="num">1</span> Upload a photo</h2>
+    <input type="file" id="file-input" accept=".png,.jpg,.jpeg">
+    <span id="upload-msg" class="msg"></span>
+  </section>
+
+  <section class="step" id="step-corners" hidden>
+    <h2><span class="num">2</span> Click the 4 corners of the page</h2>
+    <p class="help">
+      Click each corner once, going around the edge. The sides can be slanted.
+      Drag a corner to nudge it.
+    </p>
+    <div class="controls">
+      <button id="btn-undo-corner" class="ghost">Undo last corner</button>
+      <button id="btn-clear-corners" class="ghost">Clear</button>
+      <button id="btn-straighten" disabled>Straighten it</button>
+      <span id="corner-count" class="msg">0 of 4 corners</span>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="canvas-corners"></canvas>
+    </div>
+  </section>
+
+  <section class="step" id="step-boxes" hidden>
+    <h2><span class="num">3</span> Check the text in every box</h2>
+    <p class="help">
+      OCR fills in a first draft. Its guesses are drawn <b>dashed grey</b>
+      until you check them: click one, fix the text, and press <kbd>Enter</kbd>
+      to accept it and jump to the next. Drag on empty space to add a box the
+      OCR missed. <kbd>Delete</kbd> removes the selected box.
+    </p>
+    <div class="controls">
+      <button id="btn-read" class="ghost">Re-run OCR</button>
+      <button id="btn-accept-all" class="ghost">Accept all remaining</button>
+      <button id="btn-delete-box" class="ghost">Delete selected</button>
+      <button id="btn-clear-boxes" class="ghost">Clear all boxes</button>
+      <button id="btn-save">Save</button>
+      <span id="box-count" class="msg">0 boxes</span>
+      <span id="read-msg" class="msg"></span>
+    </div>
+
+    <div class="editor">
+      <div class="canvas-wrap">
+        <canvas id="canvas-boxes"></canvas>
+      </div>
+
+      <aside class="side">
+        <h3>Selected box</h3>
+        <p id="box-guess" class="guess" hidden></p>
+        <label>What does it say?
+          <input type="text" id="box-text" placeholder="leave empty if unsure"
+                 autocomplete="off">
+        </label>
+        <label>Kind
+          <select id="box-kind">
+            <option value="printed">printed</option>
+            <option value="handwritten">handwritten</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </label>
+        <p class="hint">
+          Only text you have confirmed is exported as a transcription.
+          Anything left unchecked is written as <code>###</code>, the
+          don't-care marker.
+        </p>
+        <hr>
+        <h3>Boxes</h3>
+        <ol id="box-list"></ol>
+      </aside>
+    </div>
+    <span id="save-msg" class="msg"></span>
+  </section>
+
+  <section class="step">
+    <h2>Progress</h2>
+    <div id="progress">Nothing annotated yet.</div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
