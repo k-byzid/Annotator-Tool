@@ -204,6 +204,76 @@ kbd {
   text-decoration: underline;
 }
 
+/* The batch rail: where you are, how much is left, and a way to any page.
+ * It sits between the finished steps and the working one, so it reads as
+ * status rather than as another step. */
+.rail {
+  max-width: 1180px;
+  margin: 0 auto 18px;
+  padding: 11px 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+}
+.rail-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+.rail-track {
+  flex: 1;
+  min-width: 80px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.rail-bar {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--good);
+  transition: width .2s;
+}
+button.small { font-size: 13px; padding: 5px 11px; }
+
+.rail-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 11px;
+}
+.chip {
+  font: inherit;
+  font-size: 12.5px;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: var(--sunk);
+  color: var(--muted);
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--ink); }
+/* State reads from the border, so the row stays quiet until scanned. */
+.chip.boxes { border-color: var(--warn-ink); color: var(--ink); }
+.chip.done {
+  border-color: var(--good);
+  color: var(--good);
+}
+.chip.current {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
 /* Step 1. The whole panel is the target, since a photo is more often
  * dragged in or pasted than picked out of a file dialog. */
 .drop {

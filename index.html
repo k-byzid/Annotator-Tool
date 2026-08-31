@@ -19,12 +19,13 @@
 
 <main>
   <section class="step" id="step-photo">
-    <h2><span class="num">1</span> Choose a photo</h2>
+    <h2><span class="num">1</span> Choose your photos</h2>
     <label class="drop" id="drop-zone">
-      <span class="drop-main">Drop a photo here, or click to choose one</span>
-      <span class="drop-sub">You can also paste a screenshot with
-        <kbd>Ctrl</kbd>+<kbd>V</kbd></span>
-      <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.webp">
+      <span class="drop-main">Drop photos here, or click to choose them</span>
+      <span class="drop-sub">One page or a hundred &mdash; you can also paste a
+        screenshot with <kbd>Ctrl</kbd>+<kbd>V</kbd></span>
+      <input type="file" id="file-input" multiple
+             accept=".png,.jpg,.jpeg,.webp">
     </label>
     <span id="upload-msg" class="msg"></span>
   </section>
@@ -32,7 +33,21 @@
   <div class="done" id="done-photo" hidden>
     <span class="tick">1</span>
     <span id="done-photo-text"></span>
-    <button id="btn-change-photo" class="link">Change photo</button>
+    <button id="btn-add-photos" class="link">Add more photos</button>
+  </div>
+
+  <!-- Where you are in the batch, and how much of it is left. -->
+  <div class="rail" id="rail" hidden>
+    <div class="rail-head">
+      <span id="rail-count"></span>
+      <span class="rail-track" role="progressbar" aria-valuemin="0">
+        <span class="rail-bar" id="rail-bar"></span>
+      </span>
+      <button id="btn-prev-page" class="ghost small">Previous</button>
+      <button id="btn-next-page" class="ghost small">Next</button>
+      <button id="btn-export-all" class="small">Export everything</button>
+    </div>
+    <div class="rail-list" id="rail-list"></div>
   </div>
 
   <section class="step" id="step-corners" hidden>
@@ -72,7 +87,7 @@
     <div class="controls">
       <button id="btn-delete-box" class="ghost">Delete selected</button>
       <button id="btn-clear-boxes" class="ghost">Clear all boxes</button>
-      <button id="btn-done-boxes">Done labelling</button>
+      <button id="btn-done-boxes">Done with this page</button>
       <span id="box-count" class="msg">0 boxes</span>
     </div>
 
@@ -120,11 +135,11 @@
       <div class="format">
         <h3>Whole page, for a detector</h3>
         <p>
-          The page as you labelled it: <code>&lt;name&gt;.json</code> with every
-          box, and <code>gt_&lt;name&gt;.txt</code> in
+          Each page as you labelled it: <code>&lt;name&gt;.json</code> with
+          every box, and <code>gt_&lt;name&gt;.txt</code> in
           <a href="https://rrc.cvc.uab.es/?ch=4&amp;com=tasks">ICDAR-2015</a>
           form, which text-detection trainers read. Unlabelled boxes go out as
-          <code>###</code>.
+          <code>###</code>. A batch arrives as one zip.
         </p>
         <button id="btn-download">Download page labels</button>
       </div>
@@ -134,8 +149,9 @@
         <p>
           One PNG per labelled box plus a tab-separated
           <code>labels.txt</code>, zipped &mdash; what PaddleOCR, MMOCR and
-          TrOCR read for recognition. Unlabelled boxes are left out, since
-          there is nothing to learn from them.
+          TrOCR read for recognition. A batch keeps a folder per page and
+          shares one label file. Unlabelled boxes are left out, since there is
+          nothing to learn from them.
         </p>
         <button id="btn-download-crops">Download crops</button>
       </div>

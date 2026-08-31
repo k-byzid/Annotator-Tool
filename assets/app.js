@@ -13,13 +13,24 @@ const MAX_CANVAS_WIDTH = 1000;   // biggest we draw, in screen pixels
 const HANDLE_RADIUS = 7;         // how near a corner counts as grabbing it
 const MIN_BOX = 6;               // ignore drags smaller than this
 
+/* A page of the batch. Steps 2 and 3 always act on one of these -- whichever
+ * state.index names -- so a single photo is just a batch of one. */
+function blankPage(label, photo) {
+  return {
+    label,                                     // the file's own name
+    name: label.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_-]+/g, "_") || "page",
+    photo,
+    canvas: null,      // the straightened page, once step 2 is done
+    corners: [],       // up to 4 {x, y} in photo pixels
+    boxes: [],
+    stage: "corners",  // corners -> boxes -> done
+  };
+}
+
 const state = {
-  name: "page",
-  photo: null,       // the chosen image
-  page: null,        // the straightened canvas
-  corners: [],       // up to 4 {x, y} in photo pixels
+  pages: [],
+  index: 0,
   dragCorner: -1,
-  boxes: [],
   selected: -1,
   drawing: null,
   dragging: null,    // {mode: "move"|"resize", ...} while a box is being shaped
@@ -27,6 +38,12 @@ const state = {
   scale: 1,
   lastKind: "printed",   // carried onto the next box drawn
 };
+
+// Stands in before any photo is chosen, so drawing code can guard on .photo
+// rather than every caller having to check whether a page exists at all.
+const NO_PAGE = blankPage("page", null);
+
+const pg = () => state.pages[state.index] || NO_PAGE;
 
 const $ = (id) => document.getElementById(id);
 
@@ -72,7 +89,7 @@ function toImage(canvas, event) {
 /* ------------------------------------------------------------- step 1 */
 
 $("file-input").addEventListener("change", (event) => {
-  if (event.target.files[0]) usePhoto(event.target.files[0]);
+  addPhotos(event.target.files);
 });
 
 /* A photo usually arrives by being dragged onto the page or pasted from a
@@ -94,10 +111,7 @@ const drop = $("drop-zone");
 });
 
 drop.addEventListener("drop", (event) => {
-  const file = [...(event.dataTransfer?.files || [])]
-    .find((f) => f.type.startsWith("image/"));
-  if (file) usePhoto(file);
-  else fail("That was not an image file.");
+  addPhotos(event.dataTransfer?.files);
 });
 
 /* A photo dropped anywhere but the zone would otherwise replace the page
@@ -110,9 +124,10 @@ drop.addEventListener("drop", (event) => {
 
 document.addEventListener("paste", (event) => {
   if ($("step-photo").hidden) return;
-  const item = [...(event.clipboardData?.items || [])]
-    .find((i) => i.type.startsWith("image/"));
-  if (item) usePhoto(item.getAsFile());
+  const files = [...(event.clipboardData?.items || [])]
+    .filter((i) => i.type.startsWith("image/"))
+    .map((i) => i.getAsFile());
+  if (files.length) addPhotos(files);
 });
 
 function fail(text) {
@@ -121,45 +136,144 @@ function fail(text) {
   message.className = "msg bad";
 }
 
-async function usePhoto(file) {
+/* Photos are added, never swapped in: dropping a second batch onto a session
+ * already under way appends to the queue rather than discarding the work. */
+async function addPhotos(fileList) {
+  const files = [...(fileList || [])].filter((f) => f.type.startsWith("image/"));
   const message = $("upload-msg");
-  try {
-    state.photo = await loadImage(URL.createObjectURL(file));
-  } catch (error) {
-    message.textContent = error.message;
-    message.className = "msg bad";
+
+  if (!files.length) {
+    fail("Those were not image files.");
     return;
   }
 
-  // A pasted screenshot arrives with no useful name of its own.
-  const label = file.name || "pasted-image.png";
-  state.name = label.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_-]+/g, "_") || "page";
-  state.corners = [];
-  state.boxes = [];
-  state.selected = -1;
-  message.textContent = "";
+  message.textContent = "Reading " + files.length +
+                        (files.length === 1 ? " photo..." : " photos...");
   message.className = "msg";
 
-  $("done-photo-text").textContent = label + " — " +
-    state.photo.width + " x " + state.photo.height + " pixels";
+  const failed = [];
+  for (const file of files) {
+    try {
+      const photo = await loadImage(URL.createObjectURL(file));
+      // A pasted screenshot arrives with no useful name of its own.
+      state.pages.push(blankPage(file.name || "pasted-image.png", photo));
+    } catch {
+      failed.push(file.name || "a pasted image");
+    }
+  }
 
-  hide("step-photo", "step-boxes", "done-boxes", "step-export", "done-corners");
-  show("done-photo", "step-corners");
-  drawCorners();
+  $("file-input").value = "";   // so the same file can be chosen again later
+
+  if (!state.pages.length) {
+    fail("None of those could be read as an image.");
+    return;
+  }
+
+  message.textContent = failed.length
+    ? "Could not read " + failed.join(", ") + "."
+    : "";
+  message.className = failed.length ? "msg bad" : "msg";
+
+  $("done-photo-text").textContent = state.pages.length === 1
+    ? state.pages[0].label + " — " + state.pages[0].photo.width + " x " +
+      state.pages[0].photo.height + " pixels"
+    : state.pages.length + " photos";
+
+  hide("step-photo");
+  show("done-photo");
+  goto(state.pages.findIndex((p) => p.stage !== "done"));
 }
 
-$("btn-change-photo").onclick = () => {
+/* The rail stays up: closing the file dialog without choosing anything would
+ * otherwise strand the batch with no way back to it. */
+$("btn-add-photos").onclick = () => {
   hide("done-photo", "step-corners", "done-corners",
        "step-boxes", "done-boxes", "step-export");
   show("step-photo");
-  // Clearing it means picking the same file again still counts as a change.
-  $("file-input").value = "";
   $("upload-msg").textContent = "";
-  state.photo = null;
-  state.page = null;
-  state.corners = [];
-  state.boxes = [];
+};
+
+/* --------------------------------------------------- moving between pages */
+
+/* Open a page at whichever step it has reached. Everything that changes the
+ * current page goes through here, so the rail and the canvases never
+ * disagree about which photo is on screen. */
+function goto(index) {
+  if (index < 0 || index >= state.pages.length) {
+    showExport();
+    return;
+  }
+
+  state.index = index;
   state.selected = -1;
+  state.hovered = -1;
+  $("box-text").value = "";
+
+  hide("step-corners", "done-corners", "step-boxes", "done-boxes", "step-export");
+  if (pg().canvas) {
+    show("done-corners", "step-boxes");
+    $("done-corners-text").textContent = pg().straightened
+      ? "Page straightened." : "Used as-is, already flat.";
+    refreshBoxes();
+  } else {
+    show("step-corners");
+    drawCorners();
+  }
+  renderRail();
+}
+
+function pageSummary(page) {
+  if (page.stage === "corners") return "not started";
+  const blank = page.boxes.filter((b) => !b.text).length;
+  if (!page.boxes.length) return "no boxes yet";
+  return page.boxes.length + (page.boxes.length === 1 ? " box" : " boxes") +
+         (blank ? ", " + blank + " unlabelled" : "");
+}
+
+/* The rail is the only thing on screen that shows the whole batch, so it
+ * carries both where you are and how much is left. */
+function renderRail() {
+  const rail = $("rail");
+  if (state.pages.length < 2) {
+    rail.hidden = true;
+    return;
+  }
+  rail.hidden = false;
+
+  const done = state.pages.filter((p) => p.stage === "done").length;
+  $("rail-count").textContent = "Page " + (state.index + 1) + " of " +
+                                state.pages.length + " — " + done + " finished";
+  $("rail-bar").style.width = Math.round(done / state.pages.length * 100) + "%";
+  $("rail-bar").parentElement.setAttribute("aria-valuenow", done);
+  $("rail-bar").parentElement.setAttribute("aria-valuemax", state.pages.length);
+  $("btn-prev-page").disabled = state.index === 0;
+  $("btn-next-page").disabled = state.index === state.pages.length - 1;
+
+  const list = $("rail-list");
+  list.innerHTML = "";
+  state.pages.forEach((page, index) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip " + page.stage +
+                     (index === state.index ? " current" : "");
+    chip.textContent = (index + 1) + ". " + page.label;
+    chip.title = page.label + " — " + pageSummary(page);
+    chip.onclick = () => {
+      saveSelectedText();
+      goto(index);
+    };
+    list.appendChild(chip);
+  });
+}
+
+$("btn-prev-page").onclick = () => {
+  saveSelectedText();
+  if (state.index > 0) goto(state.index - 1);
+};
+
+$("btn-next-page").onclick = () => {
+  saveSelectedText();
+  if (state.index < state.pages.length - 1) goto(state.index + 1);
 };
 
 /* ------------------------------------------------------------- step 2 */
@@ -168,7 +282,7 @@ const cornerCanvas = $("canvas-corners");
 const cornerCtx = cornerCanvas.getContext("2d");
 
 function drawCorners() {
-  const image = state.photo;
+  const image = pg().photo;
   if (!image) return;
 
   state.scale = fitScale(image);
@@ -176,7 +290,7 @@ function drawCorners() {
   cornerCanvas.height = image.height * state.scale;
   cornerCtx.drawImage(image, 0, 0, cornerCanvas.width, cornerCanvas.height);
 
-  const points = state.corners.map((p) => ({
+  const points = pg().corners.map((p) => ({
     x: p.x * state.scale,
     y: p.y * state.scale,
   }));
@@ -204,14 +318,14 @@ function drawCorners() {
     cornerCtx.fillText(String(index + 1), point.x + 9, point.y - 9);
   });
 
-  $("corner-count").textContent = state.corners.length + " of 4 corners";
-  $("btn-straighten").disabled = state.corners.length !== 4;
+  $("corner-count").textContent = pg().corners.length + " of 4 corners";
+  $("btn-straighten").disabled = pg().corners.length !== 4;
 }
 
 function nearestCorner(point) {
   const reach = HANDLE_RADIUS / state.scale + 4;
-  for (let i = 0; i < state.corners.length; i += 1) {
-    const corner = state.corners[i];
+  for (let i = 0; i < pg().corners.length; i += 1) {
+    const corner = pg().corners[i];
     if (Math.hypot(corner.x - point.x, corner.y - point.y) <= reach) return i;
   }
   return -1;
@@ -224,15 +338,15 @@ cornerCanvas.addEventListener("pointerdown", (event) => {
   if (grabbed >= 0) {
     state.dragCorner = grabbed;
     cornerCanvas.setPointerCapture(event.pointerId);
-  } else if (state.corners.length < 4) {
-    state.corners.push(point);
+  } else if (pg().corners.length < 4) {
+    pg().corners.push(point);
   }
   drawCorners();
 });
 
 cornerCanvas.addEventListener("pointermove", (event) => {
   if (state.dragCorner < 0) return;
-  state.corners[state.dragCorner] = toImage(cornerCanvas, event);
+  pg().corners[state.dragCorner] = toImage(cornerCanvas, event);
   drawCorners();
 });
 
@@ -241,54 +355,49 @@ cornerCanvas.addEventListener("pointerup", () => {
 });
 
 $("btn-undo-corner").onclick = () => {
-  state.corners.pop();
+  pg().corners.pop();
   drawCorners();
 };
 
 $("btn-clear-corners").onclick = () => {
-  state.corners = [];
+  pg().corners = [];
   drawCorners();
 };
 
-function startBoxes(canvas, note) {
-  state.page = canvas;
-  state.boxes = [];
-  state.selected = -1;
-  $("box-text").value = "";
-  $("done-corners-text").textContent = note;
-
-  hide("step-corners", "done-boxes", "step-export");
-  show("done-corners", "step-boxes");
-  refreshBoxes();
+function startBoxes(canvas, straightened) {
+  pg().canvas = canvas;
+  pg().boxes = [];
+  pg().straightened = straightened;
+  pg().stage = "boxes";
+  goto(state.index);
 }
 
 $("btn-straighten").onclick = () => {
-  startBoxes(warp(state.photo, state.corners), "Page straightened.");
+  startBoxes(warp(pg().photo, pg().corners), true);
 };
 
 // A scan or a screenshot is already flat, and forcing four clicks onto one
 // would only introduce error.
 $("btn-skip").onclick = () => {
   const canvas = document.createElement("canvas");
-  canvas.width = state.photo.width;
-  canvas.height = state.photo.height;
-  canvas.getContext("2d").drawImage(state.photo, 0, 0);
-  startBoxes(canvas, "Used as-is, already flat.");
+  canvas.width = pg().photo.width;
+  canvas.height = pg().photo.height;
+  canvas.getContext("2d").drawImage(pg().photo, 0, 0);
+  startBoxes(canvas, false);
 };
 
 // Straightening again remaps the page, so boxes drawn on the old one would
 // land in the wrong places. Say so before throwing them away.
 $("btn-redo-corners").onclick = () => {
-  if (state.boxes.length &&
+  if (pg().boxes.length &&
       !confirm("Redoing the corners re-cuts the page, so the " +
-               state.boxes.length + " boxes drawn on it are discarded. Go on?")) {
+               pg().boxes.length + " boxes drawn on it are discarded. Go on?")) {
     return;
   }
-  state.boxes = [];
-  state.selected = -1;
-  hide("done-corners", "step-boxes", "done-boxes", "step-export");
-  show("step-corners");
-  drawCorners();
+  pg().boxes = [];
+  pg().canvas = null;
+  pg().stage = "corners";
+  goto(state.index);
 };
 
 /* ------------------------------------------------------------- step 3 */
@@ -344,7 +453,7 @@ function handleAt(box, point) {
 }
 
 function drawBoxes() {
-  const image = state.page;
+  const image = pg().canvas;
   if (!image) return;
 
   state.scale = fitScale(image);
@@ -352,7 +461,7 @@ function drawBoxes() {
   boxCanvas.height = image.height * state.scale;
   boxCtx.drawImage(image, 0, 0, boxCanvas.width, boxCanvas.height);
 
-  state.boxes.forEach((box, index) => {
+  pg().boxes.forEach((box, index) => {
     const points = box.points.map((p) => [p[0] * state.scale, p[1] * state.scale]);
     boxCtx.beginPath();
     boxCtx.moveTo(points[0][0], points[0][1]);
@@ -371,7 +480,7 @@ function drawBoxes() {
   boxCtx.setLineDash([]);
 
   // Grab handles, on the selected box only, so the page stays readable.
-  const selected = state.boxes[state.selected];
+  const selected = pg().boxes[state.selected];
   if (selected) {
     handlesOf(selected).forEach((handle) => {
       boxCtx.beginPath();
@@ -397,9 +506,9 @@ function drawBoxes() {
 
 function hitTest(point) {
   // Last drawn wins, so a box sitting on top of another is the one selected.
-  for (let i = state.boxes.length - 1; i >= 0; i -= 1) {
-    const xs = state.boxes[i].points.map((p) => p[0]);
-    const ys = state.boxes[i].points.map((p) => p[1]);
+  for (let i = pg().boxes.length - 1; i >= 0; i -= 1) {
+    const xs = pg().boxes[i].points.map((p) => p[0]);
+    const ys = pg().boxes[i].points.map((p) => p[1]);
     if (point.x >= Math.min(...xs) && point.x <= Math.max(...xs) &&
         point.y >= Math.min(...ys) && point.y <= Math.max(...ys)) {
       return i;
@@ -410,7 +519,7 @@ function hitTest(point) {
 
 boxCanvas.addEventListener("pointerdown", (event) => {
   const point = toImage(boxCanvas, event);
-  const selected = state.boxes[state.selected];
+  const selected = pg().boxes[state.selected];
 
   // A handle on the selected box wins over anything underneath it.
   const handle = selected && handleAt(selected, point);
@@ -432,7 +541,7 @@ boxCanvas.addEventListener("pointerdown", (event) => {
   const hit = hitTest(point);
   if (hit >= 0) {
     selectBox(hit);
-    state.dragging = { mode: "move", from: point, start: boundsOf(state.boxes[hit]) };
+    state.dragging = { mode: "move", from: point, start: boundsOf(pg().boxes[hit]) };
     boxCanvas.setPointerCapture(event.pointerId);
     $("box-text").focus();
     $("box-text").select();
@@ -447,7 +556,7 @@ boxCanvas.addEventListener("pointermove", (event) => {
   const point = toImage(boxCanvas, event);
 
   if (state.dragging) {
-    const box = state.boxes[state.selected];
+    const box = pg().boxes[state.selected];
     if (!box) return;
     if (state.dragging.mode === "move") {
       const dx = point.x - state.dragging.from.x;
@@ -473,7 +582,7 @@ boxCanvas.addEventListener("pointermove", (event) => {
   }
 
   // Idle: say what the pointer is over before it is clicked.
-  const selectedBox = state.boxes[state.selected];
+  const selectedBox = pg().boxes[state.selected];
   const overHandle = selectedBox && handleAt(selectedBox, point);
   const over = hitTest(point);
   boxCanvas.style.cursor = overHandle
@@ -496,7 +605,7 @@ boxCanvas.addEventListener("pointerleave", () => {
 boxCanvas.addEventListener("pointerup", () => {
   if (state.dragging) {
     // A drag that inverted the rectangle is put back the right way round.
-    const box = state.boxes[state.selected];
+    const box = pg().boxes[state.selected];
     if (box) setBounds(box, boundsOf(box));
     state.dragging = null;
     refreshBoxes();
@@ -513,12 +622,12 @@ boxCanvas.addEventListener("pointerup", () => {
     return;
   }
 
-  state.boxes.push({
+  pg().boxes.push({
     points: rectToPoints(drawn.x0, drawn.y0, drawn.x1, drawn.y1),
     text: "",
     kind: state.lastKind,
   });
-  selectBox(state.boxes.length - 1);
+  selectBox(pg().boxes.length - 1);
   $("box-text").focus();
 });
 
@@ -527,7 +636,7 @@ boxCanvas.addEventListener("pointerup", () => {
 function selectBox(index) {
   saveSelectedText();
   state.selected = index;
-  const box = state.boxes[index];
+  const box = pg().boxes[index];
 
   $("box-text").value = box ? box.text : "";
   $("box-kind").value = box ? box.kind : state.lastKind;
@@ -535,7 +644,7 @@ function selectBox(index) {
 }
 
 function saveSelectedText() {
-  const box = state.boxes[state.selected];
+  const box = pg().boxes[state.selected];
   if (!box) return;
   box.text = $("box-text").value;
   box.kind = $("box-kind").value;
@@ -544,7 +653,7 @@ function saveSelectedText() {
 /* Enter finishes a box and hands the canvas back, so a page is worked through
  * as draw, type, Enter, draw the next one. */
 function commitBox() {
-  const box = state.boxes[state.selected];
+  const box = pg().boxes[state.selected];
   if (!box) return;
   saveSelectedText();
   state.selected = -1;
@@ -556,7 +665,7 @@ function commitBox() {
 function refreshBoxes() {
   const list = $("box-list");
   list.innerHTML = "";
-  state.boxes.forEach((box, index) => {
+  pg().boxes.forEach((box, index) => {
     const item = document.createElement("li");
     const flag = box.text ? "" : ' <span class="todo">no label</span>';
     item.innerHTML = (escapeHtml(box.text) || "<i>(empty)</i>") +
@@ -579,10 +688,10 @@ function refreshBoxes() {
     list.appendChild(item);
   });
 
-  const blank = state.boxes.filter((b) => !b.text).length;
+  const blank = pg().boxes.filter((b) => !b.text).length;
   $("box-count").textContent = blank
-    ? state.boxes.length + " boxes - " + blank + " still to label"
-    : state.boxes.length + " boxes";
+    ? pg().boxes.length + " boxes - " + blank + " still to label"
+    : pg().boxes.length + " boxes";
   drawBoxes();
 }
 
@@ -594,7 +703,7 @@ $("box-text").addEventListener("keydown", (event) => {
 });
 
 $("box-text").addEventListener("input", () => {
-  const box = state.boxes[state.selected];
+  const box = pg().boxes[state.selected];
   if (box) {
     box.text = $("box-text").value;
     refreshBoxes();
@@ -603,7 +712,7 @@ $("box-text").addEventListener("input", () => {
 
 $("box-kind").addEventListener("change", () => {
   state.lastKind = $("box-kind").value;
-  const box = state.boxes[state.selected];
+  const box = pg().boxes[state.selected];
   if (box) box.kind = state.lastKind;
   refreshBoxes();
 });
@@ -637,8 +746,8 @@ document.addEventListener("keydown", (event) => {
 /* Undo drops the most recent box. Drawing one is the only action here that
  * is easy to do by accident -- a stray drag across the page. */
 function undoBox() {
-  if (!state.boxes.length) return;
-  state.boxes.pop();
+  if (!pg().boxes.length) return;
+  pg().boxes.pop();
   state.selected = -1;
   $("box-text").value = "";
   refreshBoxes();
@@ -646,7 +755,7 @@ function undoBox() {
 
 function deleteSelected() {
   if (state.selected < 0) return;
-  state.boxes.splice(state.selected, 1);
+  pg().boxes.splice(state.selected, 1);
   state.selected = -1;
   $("box-text").value = "";
   refreshBoxes();
@@ -654,29 +763,58 @@ function deleteSelected() {
 
 /* ------------------------------------------------------------- step 4 */
 
+/* Finishing a page hands over to the next one that still needs work, so a
+ * batch is worked straight through without going back to a menu. */
 $("btn-done-boxes").onclick = () => {
+  saveSelectedText();
+  pg().stage = "done";
+
+  const next = state.pages.findIndex((p) => p.stage !== "done");
+  if (next >= 0) {
+    goto(next);
+    return;
+  }
+  showExport();
+};
+
+function showExport() {
   saveSelectedText();
   state.selected = -1;
   $("box-text").value = "";
-  refreshBoxes();
 
-  const blank = state.boxes.filter((b) => !b.text).length;
-  $("done-boxes-text").textContent = state.boxes.length + " boxes labelled.";
-  $("export-summary").textContent = blank
-    ? state.boxes.length + " boxes, " + blank +
-      " of them left unlabelled and exported as ###."
-    : "All " + state.boxes.length + " boxes carry a label.";
+  // Counted over exactly what the buttons below will write out.
+  const pages = exportable();
+  const boxes = pages.reduce((n, { page }) => n + page.boxes.length, 0);
+  const blank = pages.reduce(
+    (n, { page }) => n + page.boxes.filter((b) => !b.text).length, 0,
+  );
+
+  $("done-boxes-text").textContent = pages.length === 1
+    ? boxes + " boxes labelled."
+    : pages.length + " pages, " + boxes + " boxes labelled.";
+  $("export-summary").textContent = boxes === 0
+    ? "No boxes drawn yet — there is nothing to export."
+    : blank
+      ? boxes + " boxes across " + pages.length +
+        (pages.length === 1 ? " page, " : " pages, ") + blank +
+        " of them left unlabelled and exported as ###."
+      : "All " + boxes + " boxes across " +
+        (pages.length === 1 ? "this page " : pages.length + " pages ") +
+        "carry a label.";
   $("save-msg").textContent = "";
   $("save-msg").className = "msg";
 
-  hide("step-boxes");
+  hide("step-corners", "done-corners", "step-boxes");
   show("done-boxes", "step-export");
-};
+  renderRail();
+}
+
+$("btn-export-all").onclick = showExport;
 
 $("btn-back-to-boxes").onclick = () => {
   hide("done-boxes", "step-export");
-  show("step-boxes");
-  refreshBoxes();
+  // Back to the page that was open, at whichever step it had reached.
+  goto(state.index);
 };
 
 /* --------------------------------------------------------- the download */
@@ -684,7 +822,7 @@ $("btn-back-to-boxes").onclick = () => {
 $("btn-delete-box").onclick = deleteSelected;
 
 $("btn-clear-boxes").onclick = () => {
-  state.boxes = [];
+  pg().boxes = [];
   state.selected = -1;
   $("box-text").value = "";
   refreshBoxes();
@@ -699,37 +837,72 @@ function download(filename, body, type = "text/plain;charset=utf-8") {
   URL.revokeObjectURL(url);
 }
 
+const encode = (text) => new TextEncoder().encode(text);
+
+/* Pages carrying work, and a name apiece that is safe to use as a filename.
+ * Two photos called receipt.jpg would otherwise overwrite each other inside
+ * the archive, so a repeat picks up a numbered suffix. */
+function exportable() {
+  const taken = new Map();
+  return state.pages.filter((p) => p.canvas && p.boxes.length).map((page) => {
+    const seen = (taken.get(page.name) || 0) + 1;
+    taken.set(page.name, seen);
+    return { page, name: seen === 1 ? page.name : page.name + "_" + seen };
+  });
+}
+
+function jsonFor(page, name) {
+  return JSON.stringify({
+    image: name,
+    width: page.canvas.width,
+    height: page.canvas.height,
+    created: new Date().toISOString().slice(0, 19),
+    boxes: page.boxes,
+  }, null, 2);
+}
+
+// ICDAR-2015: eight numbers then the text, one box per line. A box left
+// without a label goes out as "###", the don't-care marker, so a detector
+// still learns the box while no recogniser is trained on a blank.
+function icdarFor(page) {
+  return page.boxes.map((box) => {
+    const coords = box.points.map((p) => Math.round(p[0]) + "," + Math.round(p[1])).join(",");
+    return coords + "," + (box.text || "###");
+  }).join("\n") + "\n";
+}
+
 $("btn-download").onclick = () => {
   saveSelectedText();
   const message = $("save-msg");
+  const pages = exportable();
 
-  if (!state.boxes.length) {
+  if (!pages.length) {
     message.textContent = "Draw at least one box first.";
     message.className = "msg bad";
     return;
   }
 
-  const record = {
-    image: state.name,
-    width: state.page.width,
-    height: state.page.height,
-    created: new Date().toISOString().slice(0, 19),
-    boxes: state.boxes,
-  };
-  download(state.name + ".json", JSON.stringify(record, null, 2));
+  const boxes = pages.reduce((n, p) => n + p.page.boxes.length, 0);
 
-  // ICDAR-2015: eight numbers then the text, one box per line. A box left
-  // without a label goes out as "###", the don't-care marker, so a detector
-  // still learns the box while no recogniser is trained on a blank.
-  const lines = state.boxes.map((box) => {
-    const coords = box.points.map((p) => Math.round(p[0]) + "," + Math.round(p[1])).join(",");
-    return coords + "," + (box.text || "###");
+  // One page still comes out as the plain pair; only a batch needs an archive.
+  if (pages.length === 1) {
+    const { page, name } = pages[0];
+    download(name + ".json", jsonFor(page, name));
+    download("gt_" + name + ".txt", icdarFor(page));
+    message.textContent = "Downloaded " + boxes + " boxes as .json and .txt";
+    message.className = "msg ok";
+    return;
+  }
+
+  const files = [];
+  pages.forEach(({ page, name }) => {
+    files.push({ name: name + ".json", data: encode(jsonFor(page, name)) });
+    files.push({ name: "gt_" + name + ".txt", data: encode(icdarFor(page)) });
   });
-  download("gt_" + state.name + ".txt", lines.join("\n") + "\n");
+  download("page_labels.zip", zip(files), "application/zip");
 
-  const labelled = state.boxes.filter((b) => b.text).length;
-  message.textContent = "Downloaded " + state.boxes.length + " boxes (" +
-                        labelled + " labelled) as .json and .txt";
+  message.textContent = "Downloaded " + boxes + " boxes from " + pages.length +
+                        " pages as page_labels.zip";
   message.className = "msg ok";
 };
 
@@ -744,35 +917,51 @@ function toPng(canvas) {
   });
 }
 
-/* One PNG per labelled box, cut from the straightened page at full
- * resolution -- the display scale never enters into it. */
-async function cropsOf(boxes) {
+/* One PNG per labelled box, cut from each straightened page at full
+ * resolution -- the display scale never enters into it. A batch keeps its
+ * crops in a folder per page and shares one labels.txt, which is the layout
+ * recognition trainers expect to be pointed at. */
+async function cropsOf(pages, onProgress) {
   const cutter = document.createElement("canvas");
   const ctx = cutter.getContext("2d");
+  const many = pages.length > 1;
 
   const files = [];
   const lines = [];
+  let cut = 0;
 
-  for (let i = 0; i < boxes.length; i += 1) {
-    const b = boundsOf(boxes[i]);
-    const left = Math.max(0, Math.round(b.left));
-    const top = Math.max(0, Math.round(b.top));
-    const width = Math.min(state.page.width - left, Math.round(b.right - b.left));
-    const height = Math.min(state.page.height - top, Math.round(b.bottom - b.top));
-    if (width < 1 || height < 1) continue;
+  for (const { page, name } of pages) {
+    const folder = many ? "crops/" + name + "/" : "crops/";
+    let index = 0;
 
-    cutter.width = width;
-    cutter.height = height;
-    ctx.drawImage(state.page, left, top, width, height, 0, 0, width, height);
+    for (const box of page.boxes) {
+      if (!box.text) continue;      // nothing for a recogniser to learn
 
-    const name = "crops/" + String(files.length + 1).padStart(4, "0") + ".png";
-    files.push({ name, data: new Uint8Array(await toPng(cutter)) });
-    // Tab-separated, the separator every recognition trainer splits on. A tab
-    // or newline inside a label would break the line, so they become spaces.
-    lines.push(name + "\t" + boxes[i].text.replace(/[\t\r\n]+/g, " "));
+      const b = boundsOf(box);
+      const left = Math.max(0, Math.round(b.left));
+      const top = Math.max(0, Math.round(b.top));
+      const width = Math.min(page.canvas.width - left, Math.round(b.right - b.left));
+      const height = Math.min(page.canvas.height - top, Math.round(b.bottom - b.top));
+      if (width < 1 || height < 1) continue;
+
+      cutter.width = width;
+      cutter.height = height;
+      ctx.drawImage(page.canvas, left, top, width, height, 0, 0, width, height);
+
+      index += 1;
+      const file = folder + String(index).padStart(4, "0") + ".png";
+      files.push({ name: file, data: new Uint8Array(await toPng(cutter)) });
+      // Tab-separated, the separator every recognition trainer splits on. A
+      // tab or newline inside a label would break the line, so they become
+      // spaces.
+      lines.push(file + "\t" + box.text.replace(/[\t\r\n]+/g, " "));
+
+      cut += 1;
+      if (cut % 25 === 0) onProgress(cut);
+    }
   }
 
-  files.push({ name: "labels.txt", data: new TextEncoder().encode(lines.join("\n") + "\n") });
+  files.push({ name: "labels.txt", data: encode(lines.join("\n") + "\n") });
   return files;
 }
 
@@ -781,22 +970,28 @@ $("btn-download-crops").onclick = async () => {
   const message = $("save-msg");
   const button = $("btn-download-crops");
 
-  const labelled = state.boxes.filter((b) => b.text);
-  if (!labelled.length) {
+  const pages = exportable();
+  const labelled = pages.reduce(
+    (n, { page }) => n + page.boxes.filter((b) => b.text).length, 0,
+  );
+  if (!labelled) {
     message.textContent = "No labelled boxes yet — a recogniser needs the text.";
     message.className = "msg bad";
     return;
   }
 
   button.disabled = true;
-  message.textContent = "Cutting " + labelled.length + " crops...";
   message.className = "msg";
+  message.textContent = "Cutting " + labelled + " crops...";
 
   try {
-    const files = await cropsOf(labelled);
-    download(state.name + "_crops.zip", zip(files), "application/zip");
-    message.textContent = "Downloaded " + labelled.length +
-                          " crops and labels.txt as " + state.name + "_crops.zip";
+    const files = await cropsOf(pages, (done) => {
+      message.textContent = "Cutting crops... " + done + " of " + labelled;
+    });
+    const archive = pages.length === 1 ? pages[0].name + "_crops.zip" : "crops.zip";
+    download(archive, zip(files), "application/zip");
+    message.textContent = "Downloaded " + labelled + " crops and labels.txt as " +
+                          archive;
     message.className = "msg ok";
   } catch (error) {
     message.textContent = error.message;
