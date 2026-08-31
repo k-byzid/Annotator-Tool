@@ -18,13 +18,19 @@
 </header>
 
 <main>
-  <section class="step">
+  <section class="step" id="step-photo">
     <h2><span class="num">1</span> Choose a photo</h2>
     <div class="controls">
       <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.webp">
       <span id="upload-msg" class="msg"></span>
     </div>
   </section>
+
+  <div class="done" id="done-photo" hidden>
+    <span class="tick">1</span>
+    <span id="done-photo-text"></span>
+    <button id="btn-change-photo" class="link">Change photo</button>
+  </div>
 
   <section class="step" id="step-corners" hidden>
     <h2><span class="num">2</span> Click the 4 corners of the page</h2>
@@ -44,6 +50,12 @@
     </div>
   </section>
 
+  <div class="done" id="done-corners" hidden>
+    <span class="tick">2</span>
+    <span id="done-corners-text"></span>
+    <button id="btn-redo-corners" class="link">Redo the corners</button>
+  </div>
+
   <section class="step" id="step-boxes" hidden>
     <h2><span class="num">3</span> Box the text and type what it says</h2>
     <p class="help">
@@ -55,7 +67,7 @@
     <div class="controls">
       <button id="btn-delete-box" class="ghost">Delete selected</button>
       <button id="btn-clear-boxes" class="ghost">Clear all boxes</button>
-      <button id="btn-download">Download labels</button>
+      <button id="btn-done-boxes" disabled>Done labelling</button>
       <span id="box-count" class="msg">0 boxes</span>
     </div>
 
@@ -87,7 +99,21 @@
         <ol id="box-list"></ol>
       </aside>
     </div>
-    <span id="save-msg" class="msg"></span>
+  </section>
+
+  <div class="done" id="done-boxes" hidden>
+    <span class="tick">3</span>
+    <span id="done-boxes-text"></span>
+    <button id="btn-back-to-boxes" class="link">Back to labelling</button>
+  </div>
+
+  <section class="step" id="step-export" hidden>
+    <h2><span class="num">4</span> Export the labels</h2>
+    <p class="help" id="export-summary"></p>
+    <div class="controls">
+      <button id="btn-download">Download labels</button>
+      <span id="save-msg" class="msg"></span>
+    </div>
   </section>
 </main>
 

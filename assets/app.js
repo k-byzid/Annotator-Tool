@@ -27,6 +27,16 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+/* One step is on screen at a time. A finished step collapses to a one-line
+ * bar naming what it produced, with a way back into it. */
+function show(...ids) {
+  ids.forEach((id) => { $(id).hidden = false; });
+}
+
+function hide(...ids) {
+  ids.forEach((id) => { $(id).hidden = true; });
+}
+
 function escapeHtml(text) {
   const holder = document.createElement("div");
   holder.textContent = text ?? "";
@@ -75,13 +85,30 @@ $("file-input").addEventListener("change", async (event) => {
   state.corners = [];
   state.boxes = [];
   state.selected = -1;
-  message.textContent = state.photo.width + " x " + state.photo.height + " pixels";
+  message.textContent = "";
   message.className = "msg";
 
-  $("step-corners").hidden = false;
-  $("step-boxes").hidden = true;
+  $("done-photo-text").textContent = file.name + " — " +
+    state.photo.width + " x " + state.photo.height + " pixels";
+
+  hide("step-photo", "step-boxes", "done-boxes", "step-export", "done-corners");
+  show("done-photo", "step-corners");
   drawCorners();
 });
+
+$("btn-change-photo").onclick = () => {
+  hide("done-photo", "step-corners", "done-corners",
+       "step-boxes", "done-boxes", "step-export");
+  show("step-photo");
+  // Clearing it means picking the same file again still counts as a change.
+  $("file-input").value = "";
+  $("upload-msg").textContent = "";
+  state.photo = null;
+  state.page = null;
+  state.corners = [];
+  state.boxes = [];
+  state.selected = -1;
+};
 
 /* ------------------------------------------------------------- step 2 */
 
@@ -171,16 +198,20 @@ $("btn-clear-corners").onclick = () => {
   drawCorners();
 };
 
-function startBoxes(canvas) {
+function startBoxes(canvas, note) {
   state.page = canvas;
   state.boxes = [];
   state.selected = -1;
-  $("step-boxes").hidden = false;
+  $("box-text").value = "";
+  $("done-corners-text").textContent = note;
+
+  hide("step-corners", "done-boxes", "step-export");
+  show("done-corners", "step-boxes");
   refreshBoxes();
 }
 
 $("btn-straighten").onclick = () => {
-  startBoxes(warp(state.photo, state.corners));
+  startBoxes(warp(state.photo, state.corners), "Page straightened.");
 };
 
 // A scan or a screenshot is already flat, and forcing four clicks onto one
@@ -190,7 +221,22 @@ $("btn-skip").onclick = () => {
   canvas.width = state.photo.width;
   canvas.height = state.photo.height;
   canvas.getContext("2d").drawImage(state.photo, 0, 0);
-  startBoxes(canvas);
+  startBoxes(canvas, "Used as-is, already flat.");
+};
+
+// Straightening again remaps the page, so boxes drawn on the old one would
+// land in the wrong places. Say so before throwing them away.
+$("btn-redo-corners").onclick = () => {
+  if (state.boxes.length &&
+      !confirm("Redoing the corners re-cuts the page, so the " +
+               state.boxes.length + " boxes drawn on it are discarded. Go on?")) {
+    return;
+  }
+  state.boxes = [];
+  state.selected = -1;
+  hide("done-corners", "step-boxes", "done-boxes", "step-export");
+  show("step-corners");
+  drawCorners();
 };
 
 /* ------------------------------------------------------------- step 3 */
@@ -345,6 +391,7 @@ function refreshBoxes() {
   $("box-count").textContent = blank
     ? state.boxes.length + " boxes - " + blank + " still to label"
     : state.boxes.length + " boxes";
+  $("btn-done-boxes").disabled = state.boxes.length === 0;
   drawBoxes();
 }
 
@@ -383,6 +430,33 @@ function deleteSelected() {
   $("box-text").value = "";
   refreshBoxes();
 }
+
+/* ------------------------------------------------------------- step 4 */
+
+$("btn-done-boxes").onclick = () => {
+  saveSelectedText();
+  state.selected = -1;
+  $("box-text").value = "";
+  refreshBoxes();
+
+  const blank = state.boxes.filter((b) => !b.text).length;
+  $("done-boxes-text").textContent = state.boxes.length + " boxes labelled.";
+  $("export-summary").textContent = blank
+    ? state.boxes.length + " boxes, " + blank +
+      " of them left unlabelled and exported as ###."
+    : "All " + state.boxes.length + " boxes carry a label.";
+  $("save-msg").textContent = "";
+  $("save-msg").className = "msg";
+
+  hide("step-boxes");
+  show("done-boxes", "step-export");
+};
+
+$("btn-back-to-boxes").onclick = () => {
+  hide("done-boxes", "step-export");
+  show("step-boxes");
+  refreshBoxes();
+};
 
 /* --------------------------------------------------------- the download */
 
