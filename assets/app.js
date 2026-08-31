@@ -1,12 +1,12 @@
 /*
  * Annotator.
  *
- * Three steps: choose a photo, click its 4 corners to flatten it, then check
- * the text boxes OCR found. Everything OCR produces stays marked unverified
- * until a person accepts it, and the finished labels download to this device.
+ * Three steps: choose a photo, click its 4 corners to flatten it, then draw a
+ * box round every piece of text and type what it says. Nothing is guessed for
+ * you -- every box and every label is put there by a person -- and the
+ * finished labels download to this device.
  */
 import { warp } from "./warp.js";
-import { read } from "./ocr.js";
 
 const MAX_CANVAS_WIDTH = 1000;   // biggest we draw, in screen pixels
 const HANDLE_RADIUS = 7;         // how near a corner counts as grabbing it
@@ -22,6 +22,7 @@ const state = {
   selected: -1,
   drawing: null,
   scale: 1,
+  lastKind: "printed",   // carried onto the next box drawn
 };
 
 const $ = (id) => document.getElementById(id);
@@ -176,7 +177,6 @@ function startBoxes(canvas) {
   state.selected = -1;
   $("step-boxes").hidden = false;
   refreshBoxes();
-  runOcr();
 }
 
 $("btn-straighten").onclick = () => {
@@ -208,7 +208,7 @@ function rectToPoints(x0, y0, x1, y1) {
 
 function colourFor(box, isSelected) {
   if (isSelected) return "#2f6fed";
-  if (!box.verified) return "#9aa3ae";           // an unchecked OCR guess
+  if (!box.text) return "#9aa3ae";               // drawn, but not labelled yet
   return box.kind === "handwritten" ? "#dc7a10" : "#14894a";
 }
 
@@ -229,7 +229,7 @@ function drawBoxes() {
     boxCtx.closePath();
     boxCtx.strokeStyle = colourFor(box, index === state.selected);
     boxCtx.lineWidth = index === state.selected ? 3 : 2;
-    boxCtx.setLineDash(box.verified ? [] : [5, 4]);
+    boxCtx.setLineDash(box.text ? [] : [5, 4]);
     boxCtx.stroke();
   });
   boxCtx.setLineDash([]);
@@ -261,6 +261,8 @@ boxCanvas.addEventListener("pointerdown", (event) => {
   const hit = hitTest(point);
   if (hit >= 0) {
     selectBox(hit);
+    $("box-text").focus();
+    $("box-text").select();
     return;
   }
   state.drawing = { x0: point.x, y0: point.y, x1: point.x, y1: point.y };
@@ -286,14 +288,10 @@ boxCanvas.addEventListener("pointerup", () => {
     return;
   }
 
-  // A box drawn by hand is confirmed by definition: a person drew it.
   state.boxes.push({
     points: rectToPoints(drawn.x0, drawn.y0, drawn.x1, drawn.y1),
     text: "",
-    kind: "handwritten",
-    source: "hand",
-    verified: true,
-    confidence: null,
+    kind: state.lastKind,
   });
   selectBox(state.boxes.length - 1);
   $("box-text").focus();
@@ -305,20 +303,9 @@ function selectBox(index) {
   saveSelectedText();
   state.selected = index;
   const box = state.boxes[index];
-  const guess = $("box-guess");
-
-  if (box && box.source === "ocr" && box.confidence !== null) {
-    const percent = Math.round(box.confidence * 100);
-    const flag = box.verified ? "" : ' <span class="todo">unchecked</span>';
-    guess.innerHTML = "OCR read this as <b>" + escapeHtml(box.text) +
-                      "</b> at " + percent + "%." + flag;
-    guess.hidden = false;
-  } else {
-    guess.hidden = true;
-  }
 
   $("box-text").value = box ? box.text : "";
-  $("box-kind").value = box ? box.kind : "printed";
+  $("box-kind").value = box ? box.kind : state.lastKind;
   refreshBoxes();
 }
 
@@ -329,24 +316,16 @@ function saveSelectedText() {
   box.kind = $("box-kind").value;
 }
 
-/* Accept the selected box and jump to the next unchecked one, so a page can
- * be worked through on the keyboard alone. */
-function acceptBox() {
+/* Enter finishes a box and hands the canvas back, so a page is worked through
+ * as draw, type, Enter, draw the next one. */
+function commitBox() {
   const box = state.boxes[state.selected];
   if (!box) return;
   saveSelectedText();
-  box.verified = true;
-
-  const next = state.boxes.findIndex((b) => !b.verified);
-  if (next >= 0) {
-    selectBox(next);
-    $("box-text").focus();
-    $("box-text").select();
-  } else {
-    refreshBoxes();
-    $("read-msg").textContent = "All boxes checked.";
-    $("read-msg").className = "msg ok";
-  }
+  state.selected = -1;
+  $("box-text").value = "";
+  $("box-text").blur();
+  refreshBoxes();
 }
 
 function refreshBoxes() {
@@ -354,7 +333,7 @@ function refreshBoxes() {
   list.innerHTML = "";
   state.boxes.forEach((box, index) => {
     const item = document.createElement("li");
-    const flag = box.verified ? "" : ' <span class="todo">unchecked</span>';
+    const flag = box.text ? "" : ' <span class="todo">no label</span>';
     item.innerHTML = (escapeHtml(box.text) || "<i>(empty)</i>") +
                      ' <span class="kind">' + box.kind + "</span>" + flag;
     if (index === state.selected) item.className = "active";
@@ -362,9 +341,9 @@ function refreshBoxes() {
     list.appendChild(item);
   });
 
-  const unchecked = state.boxes.filter((b) => !b.verified).length;
-  $("box-count").textContent = unchecked
-    ? state.boxes.length + " boxes - " + unchecked + " still to check"
+  const blank = state.boxes.filter((b) => !b.text).length;
+  $("box-count").textContent = blank
+    ? state.boxes.length + " boxes - " + blank + " still to label"
     : state.boxes.length + " boxes";
   drawBoxes();
 }
@@ -372,18 +351,22 @@ function refreshBoxes() {
 $("box-text").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
-    acceptBox();
+    commitBox();
   }
 });
 
 $("box-text").addEventListener("input", () => {
   const box = state.boxes[state.selected];
-  if (box) box.text = $("box-text").value;
+  if (box) {
+    box.text = $("box-text").value;
+    refreshBoxes();
+  }
 });
 
 $("box-kind").addEventListener("change", () => {
+  state.lastKind = $("box-kind").value;
   const box = state.boxes[state.selected];
-  if (box) box.kind = $("box-kind").value;
+  if (box) box.kind = state.lastKind;
   refreshBoxes();
 });
 
@@ -397,55 +380,18 @@ function deleteSelected() {
   if (state.selected < 0) return;
   state.boxes.splice(state.selected, 1);
   state.selected = -1;
-  $("box-guess").hidden = true;
   $("box-text").value = "";
   refreshBoxes();
 }
 
-/* ----------------------------------------------------- OCR + download */
+/* --------------------------------------------------------- the download */
 
-async function runOcr() {
-  const message = $("read-msg");
-  message.className = "msg";
-  message.textContent = "Starting OCR...";
-
-  try {
-    const languages = $("lang").value.split("+");
-    const found = await read(state.page, languages, (update) => {
-      const percent = Math.round((update.progress || 0) * 100);
-      message.textContent = update.status + " " + percent + "%";
-    });
-
-    // Keep anything already confirmed; OCR only fills in the rest.
-    state.boxes = state.boxes.filter((b) => b.verified).concat(found);
-    state.selected = -1;
-    refreshBoxes();
-
-    message.textContent = "OCR found " + found.length +
-                          " boxes. Dashed grey ones are unchecked.";
-    const first = state.boxes.findIndex((b) => !b.verified);
-    if (first >= 0) selectBox(first);
-  } catch (error) {
-    message.textContent = error.message;
-    message.className = "msg bad";
-  }
-}
-
-$("btn-read").onclick = runOcr;
 $("btn-delete-box").onclick = deleteSelected;
-
-$("btn-accept-all").onclick = () => {
-  saveSelectedText();
-  state.boxes.forEach((box) => {
-    box.verified = true;
-  });
-  refreshBoxes();
-};
 
 $("btn-clear-boxes").onclick = () => {
   state.boxes = [];
   state.selected = -1;
-  $("box-guess").hidden = true;
+  $("box-text").value = "";
   refreshBoxes();
 };
 
@@ -477,18 +423,17 @@ $("btn-download").onclick = () => {
   };
   download(state.name + ".json", JSON.stringify(record, null, 2));
 
-  // ICDAR-2015: eight numbers then the text, one box per line. Text nobody
-  // has confirmed goes out as "###", the don't-care marker -- exporting an
-  // unchecked guess as truth would train a model on its own mistakes.
+  // ICDAR-2015: eight numbers then the text, one box per line. A box left
+  // without a label goes out as "###", the don't-care marker, so a detector
+  // still learns the box while no recogniser is trained on a blank.
   const lines = state.boxes.map((box) => {
     const coords = box.points.map((p) => Math.round(p[0]) + "," + Math.round(p[1])).join(",");
-    const text = box.text && box.verified ? box.text : "###";
-    return coords + "," + text;
+    return coords + "," + (box.text || "###");
   });
   download("gt_" + state.name + ".txt", lines.join("\n") + "\n");
 
-  const confirmed = state.boxes.filter((b) => b.verified && b.text).length;
+  const labelled = state.boxes.filter((b) => b.text).length;
   message.textContent = "Downloaded " + state.boxes.length + " boxes (" +
-                        confirmed + " confirmed) as .json and .txt";
+                        labelled + " labelled) as .json and .txt";
   message.className = "msg ok";
 };
