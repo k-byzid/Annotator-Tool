@@ -7,8 +7,6 @@ it says, export it in the formats detection and recognition models train on.
 
 Nothing to install, no account, no upload. Your images never leave the device.
 
-![Boxing and labelling the text on a page](docs/images/step-boxes.png)
-
 ## How it works
 
 1. **Choose a photo.** Drop it in, paste a screenshot, or pick a file.
