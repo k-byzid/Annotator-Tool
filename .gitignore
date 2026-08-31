@@ -1,0 +1,15 @@
+# Node / editors / OS
+node_modules/
+.vs/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local copy of the screenshots; the repo copies live in docs/images/
+Examples/
+
+# Local Python virtualenv, left over from the desktop version
+.venv/
+__pycache__/
