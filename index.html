@@ -20,10 +20,13 @@
 <main>
   <section class="step" id="step-photo">
     <h2><span class="num">1</span> Choose a photo</h2>
-    <div class="controls">
+    <label class="drop" id="drop-zone">
+      <span class="drop-main">Drop a photo here, or click to choose one</span>
+      <span class="drop-sub">You can also paste a screenshot with
+        <kbd>Ctrl</kbd>+<kbd>V</kbd></span>
       <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.webp">
-      <span id="upload-msg" class="msg"></span>
-    </div>
+    </label>
+    <span id="upload-msg" class="msg"></span>
   </section>
 
   <div class="done" id="done-photo" hidden>
@@ -61,13 +64,15 @@
     <p class="help">
       Drag across a piece of text to box it, type what it says, and press
       <kbd>Enter</kbd> to finish it and draw the next. A box with no label yet
-      is drawn <b>dashed grey</b>. Click any box to come back to it;
-      <kbd>Delete</kbd> removes the selected one.
+      is drawn <b>dashed grey</b>. Click a box to edit it, drag its middle to
+      move it or a corner to resize it. <kbd>Esc</kbd> deselects,
+      <kbd>Delete</kbd> removes the selected box, and <kbd>Ctrl</kbd>+<kbd>Z</kbd>
+      takes back the last one drawn.
     </p>
     <div class="controls">
       <button id="btn-delete-box" class="ghost">Delete selected</button>
       <button id="btn-clear-boxes" class="ghost">Clear all boxes</button>
-      <button id="btn-done-boxes" disabled>Done labelling</button>
+      <button id="btn-done-boxes">Done labelling</button>
       <span id="box-count" class="msg">0 boxes</span>
     </div>
 
@@ -110,10 +115,32 @@
   <section class="step" id="step-export" hidden>
     <h2><span class="num">4</span> Export the labels</h2>
     <p class="help" id="export-summary"></p>
-    <div class="controls">
-      <button id="btn-download">Download labels</button>
-      <span id="save-msg" class="msg"></span>
+
+    <div class="formats">
+      <div class="format">
+        <h3>Whole page, for a detector</h3>
+        <p>
+          The page as you labelled it: <code>&lt;name&gt;.json</code> with every
+          box, and <code>gt_&lt;name&gt;.txt</code> in
+          <a href="https://rrc.cvc.uab.es/?ch=4&amp;com=tasks">ICDAR-2015</a>
+          form, which text-detection trainers read. Unlabelled boxes go out as
+          <code>###</code>.
+        </p>
+        <button id="btn-download">Download page labels</button>
+      </div>
+
+      <div class="format">
+        <h3>Cropped lines, for a recogniser</h3>
+        <p>
+          One PNG per labelled box plus a tab-separated
+          <code>labels.txt</code>, zipped &mdash; what PaddleOCR, MMOCR and
+          TrOCR read for recognition. Unlabelled boxes are left out, since
+          there is nothing to learn from them.
+        </p>
+        <button id="btn-download-crops">Download crops</button>
+      </div>
     </div>
+    <span id="save-msg" class="msg"></span>
   </section>
 </main>
 

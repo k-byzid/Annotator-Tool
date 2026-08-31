@@ -7,6 +7,7 @@
  * finished labels download to this device.
  */
 import { warp } from "./warp.js";
+import { zip } from "./zip.js";
 
 const MAX_CANVAS_WIDTH = 1000;   // biggest we draw, in screen pixels
 const HANDLE_RADIUS = 7;         // how near a corner counts as grabbing it
@@ -21,6 +22,8 @@ const state = {
   boxes: [],
   selected: -1,
   drawing: null,
+  dragging: null,    // {mode: "move"|"resize", ...} while a box is being shaped
+  hovered: -1,
   scale: 1,
   lastKind: "printed",   // carried onto the next box drawn
 };
@@ -68,10 +71,57 @@ function toImage(canvas, event) {
 
 /* ------------------------------------------------------------- step 1 */
 
-$("file-input").addEventListener("change", async (event) => {
-  const file = event.target.files[0];
-  if (!file) return;
+$("file-input").addEventListener("change", (event) => {
+  if (event.target.files[0]) usePhoto(event.target.files[0]);
+});
 
+/* A photo usually arrives by being dragged onto the page or pasted from a
+ * screenshot tool, so accept both rather than only the file dialog. */
+const drop = $("drop-zone");
+
+["dragenter", "dragover"].forEach((name) => {
+  drop.addEventListener(name, (event) => {
+    event.preventDefault();
+    drop.classList.add("over");
+  });
+});
+
+["dragleave", "drop"].forEach((name) => {
+  drop.addEventListener(name, (event) => {
+    event.preventDefault();
+    drop.classList.remove("over");
+  });
+});
+
+drop.addEventListener("drop", (event) => {
+  const file = [...(event.dataTransfer?.files || [])]
+    .find((f) => f.type.startsWith("image/"));
+  if (file) usePhoto(file);
+  else fail("That was not an image file.");
+});
+
+/* A photo dropped anywhere but the zone would otherwise replace the page
+ * with the image file, losing the work in progress. */
+["dragover", "drop"].forEach((name) => {
+  window.addEventListener(name, (event) => {
+    if (!drop.contains(event.target)) event.preventDefault();
+  });
+});
+
+document.addEventListener("paste", (event) => {
+  if ($("step-photo").hidden) return;
+  const item = [...(event.clipboardData?.items || [])]
+    .find((i) => i.type.startsWith("image/"));
+  if (item) usePhoto(item.getAsFile());
+});
+
+function fail(text) {
+  const message = $("upload-msg");
+  message.textContent = text;
+  message.className = "msg bad";
+}
+
+async function usePhoto(file) {
   const message = $("upload-msg");
   try {
     state.photo = await loadImage(URL.createObjectURL(file));
@@ -81,20 +131,22 @@ $("file-input").addEventListener("change", async (event) => {
     return;
   }
 
-  state.name = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_-]+/g, "_") || "page";
+  // A pasted screenshot arrives with no useful name of its own.
+  const label = file.name || "pasted-image.png";
+  state.name = label.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_-]+/g, "_") || "page";
   state.corners = [];
   state.boxes = [];
   state.selected = -1;
   message.textContent = "";
   message.className = "msg";
 
-  $("done-photo-text").textContent = file.name + " — " +
+  $("done-photo-text").textContent = label + " — " +
     state.photo.width + " x " + state.photo.height + " pixels";
 
   hide("step-photo", "step-boxes", "done-boxes", "step-export", "done-corners");
   show("done-photo", "step-corners");
   drawCorners();
-});
+}
 
 $("btn-change-photo").onclick = () => {
   hide("done-photo", "step-corners", "done-corners",
@@ -258,6 +310,39 @@ function colourFor(box, isSelected) {
   return box.kind === "handwritten" ? "#dc7a10" : "#14894a";
 }
 
+/* Boxes are axis-aligned rectangles, so the four points are always a bounds
+ * pair and back again. Working in bounds keeps moving and resizing simple. */
+function boundsOf(box) {
+  const xs = box.points.map((p) => p[0]);
+  const ys = box.points.map((p) => p[1]);
+  return {
+    left: Math.min(...xs), right: Math.max(...xs),
+    top: Math.min(...ys), bottom: Math.max(...ys),
+  };
+}
+
+function setBounds(box, b) {
+  box.points = rectToPoints(b.left, b.top, b.right, b.bottom);
+}
+
+// Corner handles, in the order rectToPoints lays them out.
+function handlesOf(box) {
+  const b = boundsOf(box);
+  return [
+    { x: b.left, y: b.top, corner: "tl" },
+    { x: b.right, y: b.top, corner: "tr" },
+    { x: b.right, y: b.bottom, corner: "br" },
+    { x: b.left, y: b.bottom, corner: "bl" },
+  ];
+}
+
+function handleAt(box, point) {
+  const reach = HANDLE_RADIUS / state.scale + 3;
+  return handlesOf(box).find(
+    (h) => Math.abs(h.x - point.x) <= reach && Math.abs(h.y - point.y) <= reach,
+  );
+}
+
 function drawBoxes() {
   const image = state.page;
   if (!image) return;
@@ -273,12 +358,33 @@ function drawBoxes() {
     boxCtx.moveTo(points[0][0], points[0][1]);
     points.slice(1).forEach((p) => boxCtx.lineTo(p[0], p[1]));
     boxCtx.closePath();
-    boxCtx.strokeStyle = colourFor(box, index === state.selected);
-    boxCtx.lineWidth = index === state.selected ? 3 : 2;
+    const isSelected = index === state.selected;
+    if (index === state.hovered && !isSelected) {
+      boxCtx.fillStyle = "rgba(47, 111, 237, 0.12)";
+      boxCtx.fill();
+    }
+    boxCtx.strokeStyle = colourFor(box, isSelected);
+    boxCtx.lineWidth = isSelected || index === state.hovered ? 3 : 2;
     boxCtx.setLineDash(box.text ? [] : [5, 4]);
     boxCtx.stroke();
   });
   boxCtx.setLineDash([]);
+
+  // Grab handles, on the selected box only, so the page stays readable.
+  const selected = state.boxes[state.selected];
+  if (selected) {
+    handlesOf(selected).forEach((handle) => {
+      boxCtx.beginPath();
+      boxCtx.rect(handle.x * state.scale - HANDLE_RADIUS / 2,
+                  handle.y * state.scale - HANDLE_RADIUS / 2,
+                  HANDLE_RADIUS, HANDLE_RADIUS);
+      boxCtx.fillStyle = "#fff";
+      boxCtx.fill();
+      boxCtx.strokeStyle = "#2f6fed";
+      boxCtx.lineWidth = 2;
+      boxCtx.stroke();
+    });
+  }
 
   if (state.drawing) {
     const d = state.drawing;
@@ -304,26 +410,99 @@ function hitTest(point) {
 
 boxCanvas.addEventListener("pointerdown", (event) => {
   const point = toImage(boxCanvas, event);
+  const selected = state.boxes[state.selected];
+
+  // A handle on the selected box wins over anything underneath it.
+  const handle = selected && handleAt(selected, point);
+  if (handle) {
+    // Anchor on the corner diagonally opposite: dragging past it then just
+    // turns the box inside out and back, rather than swapping handles.
+    const b = boundsOf(selected);
+    state.dragging = {
+      mode: "resize",
+      anchor: {
+        x: handle.corner === "tl" || handle.corner === "bl" ? b.right : b.left,
+        y: handle.corner === "tl" || handle.corner === "tr" ? b.bottom : b.top,
+      },
+    };
+    boxCanvas.setPointerCapture(event.pointerId);
+    return;
+  }
+
   const hit = hitTest(point);
   if (hit >= 0) {
     selectBox(hit);
+    state.dragging = { mode: "move", from: point, start: boundsOf(state.boxes[hit]) };
+    boxCanvas.setPointerCapture(event.pointerId);
     $("box-text").focus();
     $("box-text").select();
     return;
   }
+
   state.drawing = { x0: point.x, y0: point.y, x1: point.x, y1: point.y };
   boxCanvas.setPointerCapture(event.pointerId);
 });
 
 boxCanvas.addEventListener("pointermove", (event) => {
-  if (!state.drawing) return;
   const point = toImage(boxCanvas, event);
-  state.drawing.x1 = point.x;
-  state.drawing.y1 = point.y;
-  drawBoxes();
+
+  if (state.dragging) {
+    const box = state.boxes[state.selected];
+    if (!box) return;
+    if (state.dragging.mode === "move") {
+      const dx = point.x - state.dragging.from.x;
+      const dy = point.y - state.dragging.from.y;
+      const s = state.dragging.start;
+      setBounds(box, {
+        left: s.left + dx, right: s.right + dx,
+        top: s.top + dy, bottom: s.bottom + dy,
+      });
+    } else {
+      const a = state.dragging.anchor;
+      box.points = rectToPoints(a.x, a.y, point.x, point.y);
+    }
+    drawBoxes();
+    return;
+  }
+
+  if (state.drawing) {
+    state.drawing.x1 = point.x;
+    state.drawing.y1 = point.y;
+    drawBoxes();
+    return;
+  }
+
+  // Idle: say what the pointer is over before it is clicked.
+  const selectedBox = state.boxes[state.selected];
+  const overHandle = selectedBox && handleAt(selectedBox, point);
+  const over = hitTest(point);
+  boxCanvas.style.cursor = overHandle
+    ? (overHandle.corner === "tl" || overHandle.corner === "br" ? "nwse-resize" : "nesw-resize")
+    : over >= 0 ? "move" : "crosshair";
+
+  if (over !== state.hovered) {
+    state.hovered = over;
+    drawBoxes();
+  }
+});
+
+boxCanvas.addEventListener("pointerleave", () => {
+  if (state.hovered !== -1) {
+    state.hovered = -1;
+    drawBoxes();
+  }
 });
 
 boxCanvas.addEventListener("pointerup", () => {
+  if (state.dragging) {
+    // A drag that inverted the rectangle is put back the right way round.
+    const box = state.boxes[state.selected];
+    if (box) setBounds(box, boundsOf(box));
+    state.dragging = null;
+    refreshBoxes();
+    return;
+  }
+
   const drawn = state.drawing;
   state.drawing = null;
   if (!drawn) return;
@@ -383,7 +562,20 @@ function refreshBoxes() {
     item.innerHTML = (escapeHtml(box.text) || "<i>(empty)</i>") +
                      ' <span class="kind">' + box.kind + "</span>" + flag;
     if (index === state.selected) item.className = "active";
-    item.onclick = () => selectBox(index);
+    item.onclick = () => {
+      selectBox(index);
+      $("box-text").focus();
+      $("box-text").select();
+    };
+    // Pointing at a row lights the box it names, so a long list stays findable.
+    item.onmouseenter = () => {
+      state.hovered = index;
+      drawBoxes();
+    };
+    item.onmouseleave = () => {
+      state.hovered = -1;
+      drawBoxes();
+    };
     list.appendChild(item);
   });
 
@@ -391,7 +583,6 @@ function refreshBoxes() {
   $("box-count").textContent = blank
     ? state.boxes.length + " boxes - " + blank + " still to label"
     : state.boxes.length + " boxes";
-  $("btn-done-boxes").disabled = state.boxes.length === 0;
   drawBoxes();
 }
 
@@ -420,8 +611,38 @@ $("box-kind").addEventListener("change", () => {
 document.addEventListener("keydown", (event) => {
   const typing = event.target.tagName === "INPUT" ||
                  event.target.tagName === "SELECT";
-  if (event.key === "Delete" && !typing) deleteSelected();
+
+  if ((event.key === "Delete" || event.key === "Backspace") && !typing) {
+    event.preventDefault();
+    deleteSelected();
+    return;
+  }
+
+  // Escape backs out of the selection rather than the whole step.
+  if (event.key === "Escape") {
+    saveSelectedText();
+    state.selected = -1;
+    $("box-text").value = "";
+    $("box-text").blur();
+    refreshBoxes();
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key === "z" && !typing) {
+    event.preventDefault();
+    undoBox();
+  }
 });
+
+/* Undo drops the most recent box. Drawing one is the only action here that
+ * is easy to do by accident -- a stray drag across the page. */
+function undoBox() {
+  if (!state.boxes.length) return;
+  state.boxes.pop();
+  state.selected = -1;
+  $("box-text").value = "";
+  refreshBoxes();
+}
 
 function deleteSelected() {
   if (state.selected < 0) return;
@@ -469,8 +690,8 @@ $("btn-clear-boxes").onclick = () => {
   refreshBoxes();
 };
 
-function download(filename, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+function download(filename, body, type = "text/plain;charset=utf-8") {
+  const url = URL.createObjectURL(new Blob([body], { type }));
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
@@ -483,7 +704,7 @@ $("btn-download").onclick = () => {
   const message = $("save-msg");
 
   if (!state.boxes.length) {
-    message.textContent = "There are no boxes to save.";
+    message.textContent = "Draw at least one box first.";
     message.className = "msg bad";
     return;
   }
@@ -510,4 +731,77 @@ $("btn-download").onclick = () => {
   message.textContent = "Downloaded " + state.boxes.length + " boxes (" +
                         labelled + " labelled) as .json and .txt";
   message.className = "msg ok";
+};
+
+/* ------------------------------------------------ crops for a recogniser */
+
+function toPng(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) reject(new Error("The browser could not encode a crop."));
+      else resolve(blob.arrayBuffer());
+    }, "image/png");
+  });
+}
+
+/* One PNG per labelled box, cut from the straightened page at full
+ * resolution -- the display scale never enters into it. */
+async function cropsOf(boxes) {
+  const cutter = document.createElement("canvas");
+  const ctx = cutter.getContext("2d");
+
+  const files = [];
+  const lines = [];
+
+  for (let i = 0; i < boxes.length; i += 1) {
+    const b = boundsOf(boxes[i]);
+    const left = Math.max(0, Math.round(b.left));
+    const top = Math.max(0, Math.round(b.top));
+    const width = Math.min(state.page.width - left, Math.round(b.right - b.left));
+    const height = Math.min(state.page.height - top, Math.round(b.bottom - b.top));
+    if (width < 1 || height < 1) continue;
+
+    cutter.width = width;
+    cutter.height = height;
+    ctx.drawImage(state.page, left, top, width, height, 0, 0, width, height);
+
+    const name = "crops/" + String(files.length + 1).padStart(4, "0") + ".png";
+    files.push({ name, data: new Uint8Array(await toPng(cutter)) });
+    // Tab-separated, the separator every recognition trainer splits on. A tab
+    // or newline inside a label would break the line, so they become spaces.
+    lines.push(name + "\t" + boxes[i].text.replace(/[\t\r\n]+/g, " "));
+  }
+
+  files.push({ name: "labels.txt", data: new TextEncoder().encode(lines.join("\n") + "\n") });
+  return files;
+}
+
+$("btn-download-crops").onclick = async () => {
+  saveSelectedText();
+  const message = $("save-msg");
+  const button = $("btn-download-crops");
+
+  const labelled = state.boxes.filter((b) => b.text);
+  if (!labelled.length) {
+    message.textContent = "No labelled boxes yet — a recogniser needs the text.";
+    message.className = "msg bad";
+    return;
+  }
+
+  button.disabled = true;
+  message.textContent = "Cutting " + labelled.length + " crops...";
+  message.className = "msg";
+
+  try {
+    const files = await cropsOf(labelled);
+    download(state.name + "_crops.zip", zip(files), "application/zip");
+    message.textContent = "Downloaded " + labelled.length +
+                          " crops and labels.txt as " + state.name + "_crops.zip";
+    message.className = "msg ok";
+  } catch (error) {
+    message.textContent = error.message;
+    message.className = "msg bad";
+  } finally {
+    button.disabled = false;
+  }
 };
